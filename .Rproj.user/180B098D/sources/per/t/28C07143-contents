@@ -1,0 +1,341 @@
+---
+title: "Stream Light Modeling"
+author: "Jonny Behrens"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, echo = FALSE, warning= FALSE, message=FALSE, results='hide'}
+# Set working directory. Ensure the .here file is stored in desired working directory
+knitr::opts_knit$set(root.dir = here::here())
+
+# Some knit settings 
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+## Clear environment
+rm(list = ls())
+
+#remotes::install_github('psavoy/StreamLight')
+#remotes::install_github('psavoy/StreamLightUtils')
+#install.packages('StreamPULSE')
+library(pacman)
+
+p_load(StreamPULSE,StreamLight,StreamLightUtils,readr,openxlsx,ggpubr,tidyverse)
+```
+
+# 1. Prepare Site Data
+
+```{r}
+walker_branch_site<-data.frame(Site_ID = "WalkerBranch",
+                               Lat = 35.957378, 
+                               Lon = -84.279251,
+                               startDate = as.character("2002-01-01"))
+```
+
+# 2. Download NLDAS data
+
+```{r}
+access_token <- readLines("Light-data/token.txt")
+
+nldas_get(
+  Site_ID = "WalkerBranch",
+  Lat = 35.957378, 
+  Lon = -84.279251,     
+  startDate = "2001-01-01",
+  endDate = "2026-05-01",
+  access_token = access_token,
+  save_dir = here::here("Light-data", "2026-06-12", "NLDAS_prepped")
+)
+
+NLDAS_processed<-nldas_prep(read_dir = here::here("Light-data", "2026-06-12", "NLDAS_prepped"))
+```
+
+# 3. Download AppEEARS data portal
+
+```{r}
+AppEEARS_sites <- walker_branch_site %>% 
+  dplyr::select(-startDate)
+
+readr::write_csv(AppEEARS_sites, 'Light-data/2026-06-12/AppEEARS_sites.csv')
+```
+
+Then go to: https://appeears.earthdatacloud.nasa.gov/task/point and make a data request
+
+## load it in 
+
+```{r}
+#sites_no_dash<-str_remove(sites, "-")
+
+mod_unpack <- appeears_unpack_qc(
+  zip_file = "0c9d3750-5a8c-4082-92ad-9b835d21f8b1.zip", 
+  zip_dir = here::here("Light-data/2026-06-12/"), 
+  "WalkerBranch")
+
+mod_prepped <- appeears_prep(
+  unpacked_LAI = mod_unpack,  
+  fit_method = "Gu", 
+  plot = TRUE)
+```
+
+# 4. Make Driver Files
+
+```{r}
+driver_sites <- AppEEARS_sites %>% 
+  dplyr::mutate(epsg_crs = 4326) %>% 
+  mutate(Site_ID = str_remove(Site_ID, "-"))
+
+driver_dir <- 'Light-data/2026-06-12/driver'
+
+make_driver(site_locs = driver_sites,
+            nldas_prepped = NLDAS_processed,
+            modis_prepped = mod_prepped,
+            write_output = TRUE,
+            save_dir = driver_dir)
+```
+
+# 5. Define Parameter Inputs
+
+```{r}
+# Define the dataset with all the parameters
+params<-read.xlsx("Light-data/2026-06-12/WB_light_parameters.xlsx")
+
+# Define directories
+save_dir<-"Light-data/2026-06-12/_output"
+```
+
+```{r}
+# # Tree Height
+# TH<-extract_height(
+#   Site_ID = "WalkerBranch", 
+#   Lat = 35.957378,
+#   Lon = -84.279251,
+#   site_crs = 4326
+# )
+```
+
+Calculate azimuth for sites. Thanks to Nick Marzolf for this code.
+
+```{r}
+# p_load(nhdplusTools,geosphere)
+# 
+# # We will calculate Azimuth on the actual location of the site
+# my_sites<- AppEEARS_sites
+# 
+# points <- my_sites %>% 
+#   dplyr::mutate(epsg_crs = 4326) %>% 
+#   dplyr::select(Lon, Lat) %>% 
+#   as.matrix() %>% 
+#   st_multipoint() %>% 
+#   st_sfc(crs = 4326) %>% 
+#   st_cast('POINT')
+# 
+# azimuth_df <- data.frame(Site_ID = character(),
+#                          azimuth = numeric())
+# 
+# 
+# for(k in 1:nrow(my_sites)){
+#   site <- my_sites[k,]
+#   
+#   point <- site %>% 
+#     dplyr::select(Lon, Lat) %>% 
+#     as.matrix() %>% 
+#     st_multipoint() %>% 
+#     st_sfc(crs = 4326) %>% 
+#     st_cast('POINT')
+#   
+#   comid <- discover_nhdplus_id(point)
+#   
+#   flowline <- navigate_nldi(list(featureSource = 'comid',
+#                                  featureID = comid),
+#                             mode = 'upstreamTributaries',
+#                             distance_km = 2)
+#   
+#   subset <- subset_nhdplus(comids = as.integer(flowline$UT_flowlines$nhdplus_comid[1]),
+#                            nhdplus_data = 'download',
+#                            flowline_only = TRUE,
+#                            return_data = TRUE,
+#                            overwrite = TRUE)
+#   
+#   flow_coords <- st_coordinates(subset$NHDFlowline_Network)
+#   
+#   azimuth <- bearing(p1 = flow_coords[1,1:2],
+#                      p2 = flow_coords[nrow(flow_coords), 1:2])
+#   
+#   if(azimuth < 0){azimuth = azimuth + 180}
+#   
+#   azimuth_df <- azimuth_df %>% 
+#     add_row(Site_ID = pull(site, Site_ID),
+#             azimuth = azimuth)
+# }
+# azimuth_df
+# 
+# # Save data
+# readr::write_csv(azimuth_df,
+#                  'Light-data/2026-06-12/azimuths.csv')
+```
+
+# 6. Run the Model
+
+## Define the function 
+
+```{r}
+#Function for batching over multiple sites
+  batch_model <- function(Site, driver_dir, save_dir){
+    #Get the model driver
+      driver_file <- readRDS(paste(driver_dir, "/", Site, "_driver.rds", sep = ""))
+
+    #Get model parameters for the site
+      site_p <- params[params[, "Site_ID"] == Site, ]
+
+    #Run the model
+      modeled <- stream_light(driver_file, 
+        Lat = site_p[, "Lat"], 
+        Lon = site_p[, "Lon"],
+        channel_azimuth = site_p[, "Azimuth"], 
+        bottom_width = site_p[, "Width"], 
+        BH = site_p[, "BH"],
+        BS = site_p[, "BS"], 
+        WL = site_p[, "WL"], 
+        TH = site_p[, "TH"], 
+        overhang = site_p[, "overhang"],
+        overhang_height = site_p[, "overhang_height"], 
+        x_LAD = site_p[, "x"]) %>% 
+        mutate(Site = Site)
+
+    #Save the output
+      saveRDS(modeled, paste(save_dir, "/", Site, "_modeled-on-", Sys.Date(), "_predicted.rds",  sep = ""))
+
+  } #End batch_model 
+```
+
+## Run the function
+
+```{r}
+#Applying the model to all sites
+working_dir<-getwd()
+
+# select sites with complete data
+params %>% 
+  dplyr::filter(Site_ID %in% unique(driver_sites$Site_ID))
+
+#Running the model
+lapply(params[, "Site_ID"], 
+  FUN = batch_model, 
+  driver_dir = driver_dir,
+  save_dir = save_dir) 
+
+# Merge together the output
+output_filenames <- list.files(save_dir, pattern="*.rds", full.names = TRUE)
+  
+Merged_Data<-lapply(output_filenames, readRDS) %>% 
+  data.table::rbindlist(use.names = TRUE, fill = TRUE)
+  
+#Take a look at the output
+head(Merged_Data)
+```
+
+## Save the data
+
+```{r}
+plot_data<-Merged_Data %>% 
+  mutate(Date.time.EST = local_time - hours(5), .after = local_time) %>% 
+  mutate(Date = as.Date(Date.time.EST),
+         Date_EST = as.Date(Date.time.EST)) %>% 
+  # PAR units are umol m-2 s-1, multiple by 3.6 to get to mmol m-2 hr-1
+  # then we sum that up across each hour to get mmol m-2 day-1
+  mutate(PAR_incoming_dailysum = 3.6*sum(PAR_inc),
+         PAR_belowcanopy_dailysum = 3.6*sum(PAR_bc),
+         PAR_surface_dailysum = 3.6*sum(PAR_surface),
+         LAI_daily_mean = mean(LAI),
+         .by = c(Site, Date_EST, Year)) 
+
+plot_data_daily<-plot_data %>% 
+  mutate(Date_EST = as.Date(Date.time.EST)) %>% 
+  dplyr::select(Site, Year, Date_EST, PAR_incoming_dailysum, PAR_belowcanopy_dailysum,
+         PAR_surface_dailysum, LAI_daily_mean) %>% 
+  distinct()
+```
+
+```{r}
+fwrite(plot_data, "Light-data/2026-04-16_streamLight_estimates.csv")
+fwrite(plot_data_daily, "Light-data/2026-04-16_streamLight_estimates_DAILY.csv")
+```
+
+## Quick Viz
+
+```{r}
+data<-Merged_Data %>% 
+  dplyr::filter(as.Date(local_time) >= as.Date("2023-06-01")) %>% 
+  dplyr::filter(as.Date(local_time) <= as.Date("2023-06-05"))
+
+data %>% 
+  ggplot(aes(x = local_time, y = SW_inc)) + 
+  geom_point() + 
+  facet_wrap(~Site) + 
+  theme_pubr()
+
+data %>% 
+  ggplot(aes(x = local_time, y = LAI, color = Site)) + 
+  geom_point() + 
+  theme_pubr() + 
+  ylim(0,6)
+
+data %>% 
+  ggplot(aes(x = local_time, y = PAR_inc)) + 
+  geom_point() + 
+  facet_wrap(~Site) + 
+  theme_pubr()
+
+data %>% 
+  ggplot(aes(x = local_time, y = PAR_bc, color = Site)) + 
+  geom_line() + 
+  theme_pubr()
+
+data %>% 
+  ggplot(aes(x = local_time, y = PAR_surface, color = Site)) + 
+  geom_line() + 
+  theme_pubr()
+
+data %>% 
+  ggplot(aes(x = local_time, y = veg_shade)) + 
+  geom_line() + 
+  facet_wrap(~Site) + 
+  theme_pubr()
+
+data %>% 
+  ggplot(aes(x = local_time, y = bank_shade)) + 
+  geom_line() + 
+  facet_wrap(~Site) + 
+  theme_pubr()
+
+data %>% 
+  ggplot(aes(x = local_time)) +
+  geom_line(aes(y = PAR_inc), color = "black") + 
+  geom_line(aes(y = PAR_bc), color = "darkblue") + 
+  geom_line(aes(y = PAR_surface), color = "orange") +
+  facet_wrap(~Site) + 
+  theme_pubr()
+```
+
+```{r}
+combo_plot<- plot_data %>% 
+  ggplot(aes(x=local_time, y=PAR_surface_dailysum, color = Site)) +
+  geom_point() +
+  theme_classic()
+
+combo_plot  
+#ggsave("data_processed/Light/comboplot_1.jpeg")
+
+plot_data %>% 
+  dplyr::filter(!str_detect(Site, "23|Bear|02")) %>% 
+  ggplot(aes(x=local_time, y=LAI, color = Site)) +
+  geom_point() +
+  scale_color_brewer(palette = "Paired") + 
+  theme_classic()
+
+plot_data %>% 
+  dplyr::filter(str_detect(Site, "20|town")) %>% 
+  ggplot(aes(x=local_time, y=PAR_surface_dailysum, color = Site)) +
+  geom_point() +
+  theme_classic()
+```
