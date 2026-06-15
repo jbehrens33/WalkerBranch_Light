@@ -1,6 +1,10 @@
 # General Things
 .Rproj.user
-.Rproj
+WalkerBranch.Rproj
 .Rhistory
 .RData
 .Ruserdata
+
+# Person specific token
+Light-data/token.txt
+~Light-data/token.txt
